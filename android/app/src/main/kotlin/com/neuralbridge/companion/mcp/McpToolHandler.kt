@@ -3,9 +3,12 @@ package com.neuralbridge.companion.mcp
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.graphics.Rect
+import android.os.Bundle
 import android.os.Build
 import android.util.Base64
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
 import com.neuralbridge.companion.gesture.GestureEngine
 import com.neuralbridge.companion.input.InputEngine
 import com.neuralbridge.companion.notification.NotificationListener
@@ -59,6 +62,11 @@ class McpToolHandler(
                 "android_input_text" -> handleInputText(args)
                 "android_press_key" -> handlePressKey(args)
                 "android_global_action" -> handleGlobalAction(args)
+                "android_tap_text" -> handleTapText(args)
+                "android_click_by_resource_id" -> handleClickByResourceId(args)
+                "android_set_text" -> handleSetText(args)
+                "android_clear_text" -> handleClearText(args)
+                "android_dismiss_overlay" -> handleDismissOverlay(args)
 
                 // MANAGE
                 "android_launch_app" -> handleLaunchApp(args)
@@ -66,9 +74,11 @@ class McpToolHandler(
                 "android_open_url" -> handleOpenUrl(args)
                 "android_set_clipboard" -> handleSetClipboard(args)
                 "android_list_apps" -> handleListApps(args)
+                "android_install_app" -> handleInstallApp(args)
 
                 // WAIT
                 "android_wait_for_element" -> handleWaitForElement(args)
+                "android_wait_for_text" -> handleWaitForText(args)
                 "android_wait_for_gone" -> handleWaitForGone(args)
                 "android_wait_for_idle" -> handleWaitForIdle(args)
                 "android_scroll_to_element" -> handleScrollToElement(args)
@@ -84,6 +94,7 @@ class McpToolHandler(
                 // TEST
                 "android_enable_events" -> handleEnableEvents(args)
                 "android_get_device_info" -> handleGetDeviceInfo()
+                "android_get_installed_package" -> handleGetInstalledPackage(args)
 
                 else -> errorResult("Unknown tool: $toolName")
             }
@@ -122,6 +133,155 @@ class McpToolHandler(
             (resourceId != null && (e.resourceId?.endsWith(resourceId) == true || e.resourceId == resourceId)) ||
             (contentDesc != null && e.contentDescription?.contains(contentDesc, ignoreCase = true) == true)
         }
+    }
+
+    private fun nodeText(node: AccessibilityNodeInfo): String =
+        node.text?.toString()?.takeIf { it.isNotEmpty() }
+            ?: node.contentDescription?.toString().orEmpty()
+
+    private fun matchesText(value: String, expected: String, match: String): Boolean = when (match) {
+        "exact" -> value == expected
+        "regex" -> runCatching { Regex(expected).containsMatchIn(value) }.getOrDefault(false)
+        else -> value.contains(expected, ignoreCase = true)
+    }
+
+    private fun collectNodes(
+        node: AccessibilityNodeInfo?,
+        matches: (AccessibilityNodeInfo) -> Boolean,
+        output: MutableList<AccessibilityNodeInfo> = mutableListOf()
+    ): MutableList<AccessibilityNodeInfo> {
+        if (node == null) return output
+        if (matches(node)) output.add(node)
+        for (i in 0 until node.childCount) {
+            collectNodes(node.getChild(i), matches, output)
+        }
+        return output
+    }
+
+    private fun findNodeByText(text: String, match: String, index: Int): AccessibilityNodeInfo? {
+        val root = service.rootInActiveWindow ?: return null
+        return collectNodes(root, { node ->
+            val value = nodeText(node)
+            value.isNotEmpty() && matchesText(value, text, match)
+        }).getOrNull(index)
+    }
+
+    private fun findNodeByResourceId(resourceId: String, index: Int): AccessibilityNodeInfo? {
+        val root = service.rootInActiveWindow ?: return null
+        val direct = runCatching { root.findAccessibilityNodeInfosByViewId(resourceId) }.getOrDefault(emptyList())
+        if (direct.size > index) return direct[index]
+        return collectNodes(root, { node ->
+            node.viewIdResourceName == resourceId || node.viewIdResourceName?.endsWith(resourceId) == true
+        }).getOrNull(index)
+    }
+
+    private fun clickableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = node
+        repeat(8) {
+            val candidate = current ?: return null
+            if (candidate.isClickable && candidate.isEnabled) return candidate
+            current = candidate.parent
+        }
+        return null
+    }
+
+    private suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        val clickable = clickableNode(node)
+        if (clickable?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return true
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (!rect.isEmpty) {
+            return withTimeoutOrNull(5000L) {
+                executeGestureAndWait { cb ->
+                    gestureEngine.executeTap(rect.centerX().toFloat(), rect.centerY().toFloat(), cb)
+                }
+            } ?: false
+        }
+        return false
+    }
+
+    private fun boundsJson(node: AccessibilityNodeInfo): JsonArray {
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        return buildJsonArray {
+            add(rect.left); add(rect.top); add(rect.right); add(rect.bottom)
+        }
+    }
+
+    private suspend fun waitForNode(
+        timeoutMs: Long,
+        intervalMs: Long = POLL_INTERVAL_MS,
+        finder: () -> AccessibilityNodeInfo?
+    ): AccessibilityNodeInfo? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() <= deadline) {
+            finder()?.let { return it }
+            delay(intervalMs)
+        }
+        return null
+    }
+
+    private fun packageInfoJson(packageName: String): JsonObject {
+        val pm = service.packageManager
+        val info = runCatching { pm.getPackageInfo(packageName, 0) }.getOrNull()
+        return buildJsonObject {
+            put("status", "ok")
+            put("installed", info != null)
+            put("package_name", packageName)
+            if (info != null) {
+                put("version_name", info.versionName ?: "")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    put("version_code", info.longVersionCode)
+                } else {
+                    @Suppress("DEPRECATION")
+                    put("version_code", info.versionCode)
+                }
+            }
+        }
+    }
+
+    private fun isPackageInstalled(packageName: String?): Boolean {
+        if (packageName.isNullOrBlank()) return false
+        return runCatching { service.packageManager.getPackageInfo(packageName, 0) }.isSuccess
+    }
+
+    private fun findDescendantText(node: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? =
+        collectNodes(node, { child -> nodeText(child) == text }).firstOrNull()
+
+    private fun findInstallButtonNear(appNameNode: AccessibilityNodeInfo): Pair<AccessibilityNodeInfo, String>? {
+        var current: AccessibilityNodeInfo? = appNameNode
+        repeat(6) {
+            val ancestor = current ?: return null
+            val buttons = collectNodes(ancestor, { node ->
+                val value = nodeText(node)
+                node.viewIdResourceName == "com.hihonor.appmarket:id/zy_state_app_btn" ||
+                    value in listOf("安装", "打开", "更新", "继续", "暂停") ||
+                    value.contains("%")
+            })
+            val button = buttons.firstOrNull { it != appNameNode }
+            if (button != null) return button to nodeText(button)
+            current = ancestor.parent
+        }
+        return null
+    }
+
+    private fun exactAppNameNode(appName: String): AccessibilityNodeInfo? {
+        val root = service.rootInActiveWindow ?: return null
+        val direct = collectNodes(root, { node ->
+            node.viewIdResourceName == "com.hihonor.appmarket:id/zy_app_name_txt" && nodeText(node) == appName
+        }).firstOrNull()
+        return direct ?: findNodeByText(appName, "exact", 0)
+    }
+
+    private suspend fun compactUiTree(limit: Int = 30): String {
+        val root = service.rootInActiveWindow ?: return "no_active_window"
+        val tree = uiTreeWalker.walkTree(root)
+        return tree.elements
+            .filter { !it.text.isNullOrBlank() || !it.contentDescription.isNullOrBlank() || !it.resourceId.isNullOrBlank() }
+            .take(limit)
+            .joinToString("\n") { e ->
+                "${e.resourceId ?: ""} | ${e.text ?: ""} | ${e.contentDescription ?: ""} | ${e.bounds ?: ""}"
+            }
     }
 
     // =====================================================================
@@ -173,7 +333,7 @@ class McpToolHandler(
         val quality = if (args["quality"]?.jsonPrimitive?.contentOrNull == "thumbnail")
             ScreenshotQuality.THUMBNAIL else ScreenshotQuality.FULL
 
-        val jpegBytes = withTimeout(15000L) {
+        val jpegBytes = withTimeout(70000L) {
             screenshotPipeline.capture(quality)
         }
         val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
@@ -381,6 +541,150 @@ class McpToolHandler(
     // =====================================================================
     // ACT TOOLS
     // =====================================================================
+
+    private suspend fun handleTapText(args: JsonObject): McpToolCallResult {
+        val text = args["text"]?.jsonPrimitive?.contentOrNull ?: return errorResult("text required")
+        val match = args["match"]?.jsonPrimitive?.contentOrNull ?: "exact"
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_TIMEOUT_MS
+        val index = args["index"]?.jsonPrimitive?.intOrNull ?: 0
+        val node = waitForNode(timeoutMs) { findNodeByText(text, match, index) }
+            ?: return errorResult("Text not found: $text")
+        val clicked = clickNode(node)
+        val result = buildJsonObject {
+            put("status", if (clicked) "ok" else "error")
+            put("clicked", clicked)
+            put("matched_text", nodeText(node))
+            put("bounds", boundsJson(node))
+        }
+        return if (clicked) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private suspend fun handleClickByResourceId(args: JsonObject): McpToolCallResult {
+        val resourceId = args["resource_id"]?.jsonPrimitive?.contentOrNull ?: return errorResult("resource_id required")
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_TIMEOUT_MS
+        val index = args["index"]?.jsonPrimitive?.intOrNull ?: 0
+        val node = waitForNode(timeoutMs) { findNodeByResourceId(resourceId, index) }
+            ?: return errorResult("Resource ID not found: $resourceId")
+        val clicked = clickNode(node)
+        val result = buildJsonObject {
+            put("status", if (clicked) "ok" else "error")
+            put("clicked", clicked)
+            put("resource_id", resourceId)
+            put("text", nodeText(node))
+            put("bounds", boundsJson(node))
+        }
+        return if (clicked) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private suspend fun handleSetText(args: JsonObject): McpToolCallResult {
+        val text = args["text"]?.jsonPrimitive?.contentOrNull ?: return errorResult("text required")
+        val resourceId = args["resource_id"]?.jsonPrimitive?.contentOrNull
+        val elementText = args["element_text"]?.jsonPrimitive?.contentOrNull
+        val clearFirst = args["clear_first"]?.jsonPrimitive?.booleanOrNull ?: true
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_TIMEOUT_MS
+        val node = waitForNode(timeoutMs) {
+            when {
+                resourceId != null -> findNodeByResourceId(resourceId, 0)
+                elementText != null -> findNodeByText(elementText, "contains", 0)
+                else -> service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            }
+        } ?: return errorResult("Input node not found")
+        val value = if (clearFirst) text else "${node.text ?: ""}$text"
+        val ok = inputEngine.inputText(node, value, append = false)
+        delay(500)
+        val refreshed = when {
+            resourceId != null -> findNodeByResourceId(resourceId, 0)
+            elementText != null -> findNodeByText(elementText, "contains", 0)
+            else -> service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } ?: node
+        val current = refreshed.text?.toString().orEmpty()
+        val verified = current == value || current == text
+        val result = buildJsonObject {
+            put("status", if (ok && verified) "ok" else "error")
+            put("set", ok)
+            put("verified", verified)
+            put("text", text)
+            put("current_text", current)
+            put("bounds", boundsJson(node))
+        }
+        return if (ok && verified) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private suspend fun handleClearText(args: JsonObject): McpToolCallResult {
+        val resourceId = args["resource_id"]?.jsonPrimitive?.contentOrNull
+        val elementText = args["element_text"]?.jsonPrimitive?.contentOrNull
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_TIMEOUT_MS
+        val node = waitForNode(timeoutMs) {
+            when {
+                resourceId != null -> findNodeByResourceId(resourceId, 0)
+                elementText != null -> findNodeByText(elementText, "contains", 0)
+                else -> service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            }
+        } ?: return errorResult("Input node not found")
+        val argsBundle = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        }
+        val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, argsBundle) || inputEngine.clearText(node)
+        delay(300)
+        val refreshed = when {
+            resourceId != null -> findNodeByResourceId(resourceId, 0)
+            elementText != null -> findNodeByText(elementText, "contains", 0)
+            else -> service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } ?: node
+        val result = buildJsonObject {
+            put("status", if (ok) "ok" else "error")
+            put("cleared", ok)
+            put("current_text", refreshed.text?.toString().orEmpty())
+        }
+        return if (ok) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private suspend fun handleWaitForText(args: JsonObject): McpToolCallResult {
+        val text = args["text"]?.jsonPrimitive?.contentOrNull ?: return errorResult("text required")
+        val match = args["match"]?.jsonPrimitive?.contentOrNull ?: "exact"
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_TIMEOUT_MS
+        val intervalMs = args["interval_ms"]?.jsonPrimitive?.longOrNull ?: 500L
+        val start = System.currentTimeMillis()
+        val node = waitForNode(timeoutMs, intervalMs) { findNodeByText(text, match, 0) }
+        val result = buildJsonObject {
+            put("status", "ok")
+            put("found", node != null)
+            put("text", text)
+            put("duration_ms", System.currentTimeMillis() - start)
+            node?.let {
+                put("matched_text", nodeText(it))
+                put("bounds", boundsJson(it))
+            }
+        }
+        return textResult(result.toString())
+    }
+
+    private suspend fun handleDismissOverlay(args: JsonObject): McpToolCallResult {
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: 3000L
+        val safeLabels = listOf("跳过", "稍后", "取消", "知道了", "暂不", "关闭", "不用了")
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val dismissed = mutableListOf<String>()
+        while (System.currentTimeMillis() < deadline) {
+            val label = safeLabels.firstOrNull { findNodeByText(it, "exact", 0) != null }
+            if (label == null) {
+                delay(250)
+                continue
+            }
+            val node = findNodeByText(label, "exact", 0) ?: continue
+            if (clickNode(node)) {
+                dismissed.add(label)
+                delay(500)
+            } else {
+                break
+            }
+        }
+        val result = buildJsonObject {
+            put("status", "ok")
+            put("dismissed", dismissed.isNotEmpty())
+            putJsonArray("clicked") { dismissed.forEach { add(it) } }
+        }
+        return textResult(result.toString())
+    }
 
     private suspend fun handleTap(args: JsonObject): McpToolCallResult {
         val x = args["x"]?.jsonPrimitive?.intOrNull
@@ -648,6 +952,200 @@ class McpToolHandler(
         return textResult(result.toString())
     }
 
+    private suspend fun handleInstallApp(args: JsonObject): McpToolCallResult {
+        val appName = args["app_name"]?.jsonPrimitive?.contentOrNull ?: return errorResult("app_name required")
+        val packageName = args["package_name"]?.jsonPrimitive?.contentOrNull
+        val market = args["market"]?.jsonPrimitive?.contentOrNull ?: "honor"
+        val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull ?: 180000L
+        val allowSimilarMatch = args["allow_similar_match"]?.jsonPrimitive?.booleanOrNull ?: false
+        val openAfterInstall = args["open_after_install"]?.jsonPrimitive?.booleanOrNull ?: false
+        val startedAt = System.currentTimeMillis()
+        val steps = mutableListOf<JsonObject>()
+
+        fun addStep(name: String, status: String, detail: String? = null, stepStartedAt: Long = System.currentTimeMillis()) {
+            steps.add(buildJsonObject {
+                put("name", name)
+                put("status", status)
+                put("duration_ms", System.currentTimeMillis() - stepStartedAt)
+                detail?.let { put("detail", it) }
+            })
+        }
+
+        fun installResult(status: String, extra: JsonObject = buildJsonObject {}): McpToolCallResult {
+            val body = buildJsonObject {
+                put("status", status)
+                put("app_name", appName)
+                packageName?.let { put("package_name", it) }
+                put("market", market)
+                put("duration_ms", System.currentTimeMillis() - startedAt)
+                extra.forEach { (key, value) -> put(key, value) }
+                putJsonArray("steps") { steps.forEach { add(it) } }
+            }
+            return if (status == "ok") textResult(body.toString()) else errorResult(body.toString())
+        }
+
+        if (market != "honor") {
+            return installResult("error", buildJsonObject {
+                put("error_code", "unsupported_market")
+                put("message", "Only honor market is supported in this APK build")
+            })
+        }
+
+        if (isPackageInstalled(packageName)) {
+            addStep("check_installed", "ok", "package already installed")
+            return installResult("ok", buildJsonObject {
+                put("already_installed", true)
+                put("installed", true)
+                put("final_state", "package_installed")
+            })
+        }
+
+        val launchStarted = System.currentTimeMillis()
+        val launchIntent = service.packageManager.getLaunchIntentForPackage("com.hihonor.appmarket")
+            ?: return installResult("error", buildJsonObject {
+                put("error_code", "market_not_found")
+                put("message", "Honor App Market package not found")
+            })
+        service.startActivity(launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        delay(1500)
+        addStep("open_market", "ok", "foreground=com.hihonor.appmarket", launchStarted)
+        handleDismissOverlay(buildJsonObject { put("timeout_ms", 1500) })
+
+        val searchStarted = System.currentTimeMillis()
+        val searchInputId = "com.hihonor.appmarket:id/et_search_content"
+        val searchButtonId = "com.hihonor.appmarket:id/btn_do_search"
+        val clearButtonId = "com.hihonor.appmarket:id/iv_search_clear"
+
+        val inputNode = waitForNode(10000L) {
+            findNodeByResourceId(searchInputId, 0) ?: findNodeByText("搜索", "contains", 0)
+        } ?: return installResult("error", buildJsonObject {
+            put("error_code", "search_input_not_found")
+            put("message", "Honor App Market search input not found")
+            put("last_ui_tree_compact", compactUiTree())
+        })
+        clickNode(inputNode)
+        delay(500)
+        findNodeByResourceId(clearButtonId, 0)?.let { clickNode(it); delay(300) }
+        val editableNode = findNodeByResourceId(searchInputId, 0) ?: inputNode
+        val setOk = inputEngine.inputText(editableNode, appName, append = false)
+        if (!setOk) {
+            return installResult("error", buildJsonObject {
+                put("error_code", "set_search_text_failed")
+                put("message", "Failed to input app name")
+                put("last_ui_tree_compact", compactUiTree())
+            })
+        }
+        val searchButton = waitForNode(5000L) { findNodeByResourceId(searchButtonId, 0) }
+        if (searchButton != null) {
+            clickNode(searchButton)
+        } else {
+            inputEngine.pressKey("enter", editableNode)
+        }
+        addStep("search_app", "ok", "query=$appName", searchStarted)
+
+        val matchStarted = System.currentTimeMillis()
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var matchedButton: AccessibilityNodeInfo? = null
+        var matchedState = ""
+        while (System.currentTimeMillis() < deadline) {
+            handleDismissOverlay(buildJsonObject { put("timeout_ms", 500) })
+            if (isPackageInstalled(packageName)) {
+                addStep("wait_installed", "ok", "package installed")
+                return installResult("ok", buildJsonObject {
+                    put("already_installed", false)
+                    put("installed", true)
+                    put("final_state", "package_installed")
+                })
+            }
+
+            val appNode = if (allowSimilarMatch) {
+                findNodeByText(appName, "contains", 0)
+            } else {
+                exactAppNameNode(appName)
+            }
+            val pair = appNode?.let { findInstallButtonNear(it) }
+            if (pair != null) {
+                matchedButton = pair.first
+                matchedState = pair.second
+                addStep("match_result", "ok", "matched_title=$appName,state=$matchedState", matchStarted)
+                break
+            }
+            delay(500)
+        }
+
+        val button = matchedButton ?: return installResult("error", buildJsonObject {
+            put("error_code", "target_not_found")
+            put("message", "Exact app result not found: $appName")
+            put("foreground_app", service.rootInActiveWindow?.packageName?.toString() ?: "")
+            put("last_ui_tree_compact", compactUiTree())
+        })
+
+        when {
+            matchedState == "打开" -> {
+                return installResult("ok", buildJsonObject {
+                    put("already_installed", true)
+                    put("installed", true)
+                    put("final_state", "open_button_visible")
+                    put("confidence", "ui")
+                })
+            }
+            matchedState == "更新" -> {
+                return installResult("ok", buildJsonObject {
+                    put("already_installed", true)
+                    put("installed", true)
+                    put("update_available", true)
+                    put("final_state", "update_button_visible")
+                })
+            }
+            else -> {
+                val tapStarted = System.currentTimeMillis()
+                if (!clickNode(button)) {
+                    return installResult("error", buildJsonObject {
+                        put("error_code", "tap_install_failed")
+                        put("message", "Failed to tap install button")
+                    })
+                }
+                addStep("tap_install", "ok", matchedState, tapStarted)
+            }
+        }
+
+        val waitStarted = System.currentTimeMillis()
+        while (System.currentTimeMillis() < deadline) {
+            handleDismissOverlay(buildJsonObject { put("timeout_ms", 700) })
+            if (isPackageInstalled(packageName)) {
+                addStep("wait_installed", "ok", "package installed", waitStarted)
+                if (openAfterInstall && packageName != null) {
+                    service.packageManager.getLaunchIntentForPackage(packageName)?.let {
+                        service.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+                return installResult("ok", buildJsonObject {
+                    put("already_installed", false)
+                    put("installed", true)
+                    put("final_state", "package_installed")
+                })
+            }
+            val appNode = exactAppNameNode(appName)
+            val state = appNode?.let { findInstallButtonNear(it)?.second }.orEmpty()
+            if (state == "打开") {
+                addStep("wait_installed", "ok", "open button visible", waitStarted)
+                return installResult("ok", buildJsonObject {
+                    put("already_installed", false)
+                    put("installed", true)
+                    put("final_state", "open_button_visible")
+                    put("confidence", if (packageName == null) "ui" else "ui_pending_package_check")
+                })
+            }
+            delay(1000)
+        }
+
+        return installResult("error", buildJsonObject {
+            put("error_code", "install_timeout")
+            put("message", "Install did not complete within timeout")
+            put("last_ui_tree_compact", compactUiTree())
+        })
+    }
+
     // =====================================================================
     // WAIT TOOLS
     // =====================================================================
@@ -826,6 +1324,12 @@ class McpToolHandler(
             put("density", dm.density)
         }
         return textResult(result.toString())
+    }
+
+    private fun handleGetInstalledPackage(args: JsonObject): McpToolCallResult {
+        val packageName = args["package_name"]?.jsonPrimitive?.contentOrNull
+            ?: return errorResult("package_name required")
+        return textResult(packageInfoJson(packageName).toString())
     }
 
 }

@@ -239,6 +239,84 @@ object McpToolRegistry {
                 putJsonArray("required") { add(JsonPrimitive("action")) }
             }
         ),
+        McpToolDefinition(
+            name = "android_tap_text",
+            description = "Find visible text/contentDescription and tap it. Supports exact, contains, or regex matching.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("text") { put("type", "string"); put("description", "Text to tap") }
+                    putJsonObject("match") { put("type", "string"); put("description", "exact, contains, or regex") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                    putJsonObject("index") { put("type", "integer"); put("description", "Zero-based match index") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("text")) }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_wait_for_text",
+            description = "Wait locally until text/contentDescription appears.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("text") { put("type", "string"); put("description", "Text to wait for") }
+                    putJsonObject("match") { put("type", "string"); put("description", "exact, contains, or regex") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                    putJsonObject("interval_ms") { put("type", "integer"); put("description", "Polling interval in ms") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("text")) }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_click_by_resource_id",
+            description = "Find an element by resource_id and click it, walking up to a clickable parent if needed.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("resource_id") { put("type", "string"); put("description", "Full or suffix resource ID") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                    putJsonObject("index") { put("type", "integer"); put("description", "Zero-based match index") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("resource_id")) }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_set_text",
+            description = "Set text on an input field using Accessibility ACTION_SET_TEXT first, with clipboard fallback.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("resource_id") { put("type", "string"); put("description", "Input resource ID") }
+                    putJsonObject("element_text") { put("type", "string"); put("description", "Input label/hint/text") }
+                    putJsonObject("text") { put("type", "string"); put("description", "Text to set") }
+                    putJsonObject("clear_first") { put("type", "boolean"); put("description", "Replace existing text") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("text")) }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_clear_text",
+            description = "Clear text from an input field.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("resource_id") { put("type", "string"); put("description", "Input resource ID") }
+                    putJsonObject("element_text") { put("type", "string"); put("description", "Input label/hint/text") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_dismiss_overlay",
+            description = "Dismiss low-risk known overlays using safe labels such as skip, later, cancel, close.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Timeout in ms") }
+                }
+            }
+        ),
 
         // ── MANAGE ────────────────────────────────────────────────────────
         McpToolDefinition(
@@ -297,6 +375,22 @@ object McpToolRegistry {
                 putJsonObject("properties") {
                     putJsonObject("filter") { put("type", "string"); put("description", "Filter: \"all\", \"third_party\", or \"system\"") }
                 }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_install_app",
+            description = "Install an app through Honor App Market as one local recipe. Checks package first, searches exact app name, taps install, handles safe overlays, and waits until installed/open.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("app_name") { put("type", "string"); put("description", "Display name in Honor App Market") }
+                    putJsonObject("package_name") { put("type", "string"); put("description", "Expected Android package name") }
+                    putJsonObject("market") { put("type", "string"); put("description", "Currently only honor") }
+                    putJsonObject("timeout_ms") { put("type", "integer"); put("description", "Overall timeout in ms") }
+                    putJsonObject("allow_similar_match") { put("type", "boolean"); put("description", "Allow non-exact result names") }
+                    putJsonObject("open_after_install") { put("type", "boolean"); put("description", "Open app after install") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("app_name")) }
             }
         ),
         // ── WAIT ──────────────────────────────────────────────────────────
@@ -421,6 +515,17 @@ object McpToolRegistry {
             name = "android_get_device_info",
             description = "Get device information including manufacturer, model, Android version, SDK level, and screen dimensions.",
             inputSchema = buildJsonObject { put("type", "object"); putJsonObject("properties") {} }
+        ),
+        McpToolDefinition(
+            name = "android_get_installed_package",
+            description = "Check whether a package is installed and return version information when available.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("package_name") { put("type", "string"); put("description", "Package name to inspect") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("package_name")) }
+            }
         ),
     )
 

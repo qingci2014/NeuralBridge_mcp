@@ -64,6 +64,8 @@ class ScreenshotPipeline(
     private var virtualDisplay: VirtualDisplay? = null
     @Volatile
     private var imageReader: ImageReader? = null
+    @Volatile
+    private var virtualDisplayCreatedForProjection = false
 
     // Listener notified when MediaProjection session dies
     var onMediaProjectionLost: (() -> Unit)? = null
@@ -168,8 +170,16 @@ class ScreenshotPipeline(
             val startTime = System.currentTimeMillis()
 
             try {
-                // Try MediaProjection path first
-                val bitmap = captureViaMediaProjection()
+                // Try MediaProjection path first. Android 14+ invalidates a
+                // projection if its virtual display has been torn down; when
+                // that happens, request fresh consent and retry once.
+                val bitmap = try {
+                    captureViaMediaProjection()
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "MediaProjection token invalid, requesting fresh consent", e)
+                    releaseProjectionResources()
+                    captureViaMediaProjection()
+                }
 
                 try {
                     val jpegBytes = encodeToJpeg(bitmap, quality)
@@ -220,14 +230,24 @@ class ScreenshotPipeline(
      * Capture screenshot via MediaProjection
      */
     private suspend fun captureViaMediaProjection(): Bitmap = withContext(Dispatchers.IO) {
-        // Step 1: Check if MediaProjection is already initialized (from previous manual approval)
-        // Do NOT try to initialize if not available - it would launch consent dialog
-        val projection = mediaProjection
-            ?: throw SecurityException("MediaProjection not initialized. Manual user consent required.")
+        // Step 1: Reuse an existing projection, or request consent on demand.
+        // Cloud callers cannot tap the Setup tab first, so the screenshot call must be
+        // able to launch the system consent dialog and continue after the user approves it.
+        val projection = mediaProjection ?: initializeMediaProjection().also {
+            registerCallback(it)
+            mediaProjection = it
+        }
 
         // Step 2: Create VirtualDisplay if not already created
+        if ((virtualDisplay == null || imageReader == null) && virtualDisplayCreatedForProjection) {
+            mediaProjection?.stop()
+            releaseProjectionResources()
+            throw SecurityException("MediaProjection virtual display was released; fresh consent is required.")
+        }
+
         if (virtualDisplay == null || imageReader == null) {
             virtualDisplay = createVirtualDisplay(projection)
+            virtualDisplayCreatedForProjection = true
         }
 
         // Capture local reference so projectionCallback.onStop() can't null it mid-capture
@@ -388,7 +408,7 @@ class ScreenshotPipeline(
             // Step 2: Poll for consent result (since we can't directly await Activity result from Service)
             val pollJob = scope.launch(Dispatchers.IO) {
                 var attempts = 0
-                val maxAttempts = 100 // 10 seconds timeout (100 * 100ms)
+                val maxAttempts = 600 // 60 seconds timeout (600 * 100ms)
 
                 while (attempts < maxAttempts) {
                     if (ScreenshotConsentActivity.hasConsentResult()) {
@@ -543,6 +563,7 @@ class ScreenshotPipeline(
         imageReader = null
 
         mediaProjection = null
+        virtualDisplayCreatedForProjection = false
 
         Log.d(TAG, "MediaProjection resources released (session lost)")
     }
@@ -559,6 +580,7 @@ class ScreenshotPipeline(
 
         mediaProjection?.stop()
         mediaProjection = null
+        virtualDisplayCreatedForProjection = false
 
         Log.d(TAG, "Screenshot pipeline cleaned up")
     }
