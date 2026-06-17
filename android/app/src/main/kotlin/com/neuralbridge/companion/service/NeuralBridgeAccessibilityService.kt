@@ -19,6 +19,7 @@ import com.neuralbridge.companion.gesture.GestureEngine
 import com.neuralbridge.companion.input.InputEngine
 import com.neuralbridge.companion.uitree.UiTreeWalker
 import com.neuralbridge.companion.screenshot.ScreenshotPipeline
+import com.neuralbridge.companion.mcp.CloudGatewayClient
 import com.neuralbridge.companion.mcp.McpHttpServer
 import com.neuralbridge.companion.mcp.McpToolHandler
 import kotlinx.coroutines.*
@@ -73,6 +74,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
     // MCP HTTP server
     private var mcpHttpServer: McpHttpServer? = null
+    private var cloudGatewayClient: CloudGatewayClient? = null
+    private var currentToolHandler: McpToolHandler? = null
 
     // Event listener for UI changes (CopyOnWriteArrayList for thread-safe iteration from onAccessibilityEvent)
     private val eventListeners = java.util.concurrent.CopyOnWriteArrayList<AccessibilityEventListener>()
@@ -102,11 +105,12 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         // Publish instance before conditional startup so MainActivity can query it
         instance = this
 
-        // Only start foreground service, HTTP server, and screen recording if toggle is on
+        // Only start foreground service and command servers if toggle is on.
+        // MediaProjection consent is no longer requested automatically; the
+        // AccessibilityService screenshot fallback avoids repeated system popups.
         if (isEnabled()) {
             startForegroundService()
             startMcpHttpServer()
-            requestMediaProjectionPermission()
         }
 
         Log.i(TAG, "NeuralBridge service fully initialized")
@@ -155,7 +159,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             context = this,
             toolHandler = toolHandler
         )
+        currentToolHandler = toolHandler
         mcpHttpServer = server
+        startCloudGatewayClient(toolHandler)
         serviceScope.launch {
             try {
                 server.start()
@@ -163,6 +169,48 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Failed to start MCP HTTP server", e)
             }
         }
+    }
+
+    private fun startCloudGatewayClient(toolHandler: McpToolHandler) {
+        val prefs = getSharedPreferences("neuralbridge_prefs", Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean("cloud_enabled", false)
+        if (!enabled) {
+            Log.i(TAG, "Cloud gateway client disabled")
+            return
+        }
+
+        val gatewayUrl = prefs.getString("cloud_gateway_url", null)?.trim().orEmpty()
+        val token = prefs.getString("cloud_token", null)?.trim().orEmpty()
+        val deviceId = prefs.getString("cloud_device_id", null)?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: Build.MODEL.replace(Regex("\\s+"), "-").lowercase()
+        val deviceName = prefs.getString("cloud_device_name", null)?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+        if (gatewayUrl.isEmpty() || token.isEmpty()) {
+            Log.w(TAG, "Cloud gateway enabled but cloud_gateway_url or cloud_token is missing")
+            return
+        }
+
+        cloudGatewayClient?.stop()
+        cloudGatewayClient = CloudGatewayClient(
+            scope = serviceScope,
+            toolHandler = toolHandler,
+            config = CloudGatewayClient.Config(
+                gatewayUrl = gatewayUrl,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                token = token
+            )
+        ).also { it.start() }
+    }
+
+    fun refreshCloudGatewayClient() {
+        val toolHandler = currentToolHandler ?: return
+        cloudGatewayClient?.stop()
+        cloudGatewayClient = null
+        startCloudGatewayClient(toolHandler)
     }
 
     /**
@@ -178,7 +226,10 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14+: must specify foreground service type matching manifest declaration
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            val foregroundServiceType =
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            startForeground(NOTIFICATION_ID, notification, foregroundServiceType)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -463,12 +514,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Start MCP server and request MediaProjection — called when user turns on the master toggle
+     * Start MCP server — called when user turns on the master toggle
      */
     fun enable() {
         startForegroundService()
         startMcpHttpServer()
-        requestMediaProjectionPermission()
     }
 
     /**
@@ -482,10 +532,13 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         @Suppress("DEPRECATION")
         stopForeground(true)
+        cloudGatewayClient?.stop()
+        cloudGatewayClient = null
         mcpHttpServer?.releaseScreenWakeLock()
         serviceScope.launch {
             mcpHttpServer?.stop()
             mcpHttpServer = null
+            currentToolHandler = null
         }
     }
 

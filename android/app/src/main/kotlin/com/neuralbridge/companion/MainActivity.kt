@@ -103,6 +103,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        applyCloudConfigFromIntent(intent)
 
         findViews()
         setupTabs()
@@ -114,11 +115,47 @@ class MainActivity : Activity() {
         updateAllPermissionStatus()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyCloudConfigFromIntent(intent)
+        updateServiceStatus()
+    }
+
     override fun onResume() {
         super.onResume()
         NeuralBridgeAccessibilityService.instance?.tryConsumeMediaProjectionConsent()
         updateAllPermissionStatus()
         statusHandler.post(statusRunnable)
+    }
+
+    private fun applyCloudConfigFromIntent(intent: Intent?) {
+        if (!BuildConfig.DEBUG) return
+        if (intent == null) return
+
+        val hasCloudConfig =
+            intent.hasExtra("cloud_enabled") ||
+                intent.hasExtra("cloud_gateway_url") ||
+                intent.hasExtra("cloud_token") ||
+                intent.hasExtra("cloud_device_id") ||
+                intent.hasExtra("cloud_device_name")
+        if (!hasCloudConfig) return
+
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val editor = prefs.edit()
+
+        if (intent.hasExtra("cloud_enabled")) {
+            editor.putBoolean("cloud_enabled", intent.getBooleanExtra("cloud_enabled", false))
+        }
+        intent.getStringExtra("cloud_gateway_url")?.let { editor.putString("cloud_gateway_url", it) }
+        intent.getStringExtra("cloud_token")?.let { editor.putString("cloud_token", it) }
+        intent.getStringExtra("cloud_device_id")?.let { editor.putString("cloud_device_id", it) }
+        intent.getStringExtra("cloud_device_name")?.let { editor.putString("cloud_device_name", it) }
+        editor.apply()
+
+        NeuralBridgeAccessibilityService.instance?.refreshCloudGatewayClient()
+        Toast.makeText(this, "Cloud gateway config updated", Toast.LENGTH_SHORT).show()
+        Log.i("NeuralBridge", "Cloud gateway config updated from launch intent")
     }
 
     override fun onPause() {

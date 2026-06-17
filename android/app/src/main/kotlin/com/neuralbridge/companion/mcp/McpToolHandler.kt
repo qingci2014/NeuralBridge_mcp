@@ -173,7 +173,9 @@ class McpToolHandler(
         val quality = if (args["quality"]?.jsonPrimitive?.contentOrNull == "thumbnail")
             ScreenshotQuality.THUMBNAIL else ScreenshotQuality.FULL
 
-        val jpegBytes = screenshotPipeline.capture(quality)
+        val jpegBytes = withTimeout(15000L) {
+            screenshotPipeline.capture(quality)
+        }
         val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
         val dm = service.resources.displayMetrics
         val meta = buildJsonObject {

@@ -192,7 +192,9 @@ class ScreenshotPipeline(
                 }
 
                 try {
-                    val bitmap = captureViaAccessibilityService()
+                    val bitmap = withTimeout(IMAGE_READER_TIMEOUT_MS) {
+                        captureViaAccessibilityService()
+                    }
                     try {
                         val jpegBytes = encodeToJpeg(bitmap, quality)
                         val elapsedMs = System.currentTimeMillis() - startTime
