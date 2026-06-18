@@ -95,6 +95,10 @@ class McpToolHandler(
                 "android_enable_events" -> handleEnableEvents(args)
                 "android_get_device_info" -> handleGetDeviceInfo()
                 "android_get_installed_package" -> handleGetInstalledPackage(args)
+                "android_get_screen_state" -> handleGetScreenState()
+                "android_wake_screen" -> handleWakeScreen()
+                "android_unlock_device" -> handleUnlockDevice(args)
+                "android_keep_awake" -> handleKeepAwake(args)
 
                 else -> errorResult("Unknown tool: $toolName")
             }
@@ -1330,6 +1334,170 @@ class McpToolHandler(
         val packageName = args["package_name"]?.jsonPrimitive?.contentOrNull
             ?: return errorResult("package_name required")
         return textResult(packageInfoJson(packageName).toString())
+    }
+
+    private fun handleGetScreenState(): McpToolCallResult =
+        textResult(service.getScreenStateJson().toString())
+
+    private fun handleWakeScreen(): McpToolCallResult {
+        val result = service.wakeScreenJson()
+        return if (result["status"]?.jsonPrimitive?.contentOrNull == "ok") {
+            textResult(result.toString())
+        } else {
+            errorResult(result.toString())
+        }
+    }
+
+    private suspend fun handleUnlockDevice(args: JsonObject): McpToolCallResult {
+        val pin = args["pin"]?.jsonPrimitive?.contentOrNull ?: return errorResult("pin required")
+        if (!pin.all { it.isDigit() }) {
+            return errorResult(buildJsonObject {
+                put("status", "error")
+                put("error_code", "UNSUPPORTED_PIN_FORMAT")
+                put("message", "Only numeric PIN unlock is supported")
+                put("screen_state", service.getScreenStateJson())
+            }.toString())
+        }
+
+        val wake = service.wakeScreenJson()
+        if (wake["status"]?.jsonPrimitive?.contentOrNull != "ok") {
+            return errorResult(buildJsonObject {
+                put("status", "error")
+                put("error_code", "WAKE_SCREEN_FAILED")
+                put("message", "Could not wake screen before unlock")
+                put("wake_result", wake)
+                put("screen_state", service.getScreenStateJson())
+            }.toString())
+        }
+        delay(800)
+
+        var state = service.getScreenStateJson()
+        if (state["keyguard_locked"]?.jsonPrimitive?.booleanOrNull == false) {
+            return textResult(buildJsonObject {
+                put("status", "ok")
+                put("unlocked", true)
+                put("already_unlocked", true)
+                put("screen_state", state)
+            }.toString())
+        }
+
+        val dm = service.resources.displayMetrics
+        val centerX = dm.widthPixels / 2f
+        val startY = dm.heightPixels * 0.97f
+        val endY = dm.heightPixels * 0.05f
+        val swiped = executeGestureAndWait { cb ->
+            gestureEngine.executeSwipe(centerX, startY, centerX, endY, 900L, cb)
+        }
+        if (!swiped) {
+            return errorResult(buildJsonObject {
+                put("status", "error")
+                put("error_code", "KEYGUARD_SWIPE_FAILED")
+                put("message", "Unable to swipe up on lockscreen")
+                put("screen_state", service.getScreenStateJson())
+            }.toString())
+        }
+        delay(900)
+        if (!isPinKeypadVisible()) {
+            executeGestureAndWait { cb ->
+                gestureEngine.executeSwipe(centerX, startY, centerX, endY, 900L, cb)
+            }
+            delay(900)
+        }
+
+        val digitsOk = inputPinDigits(pin)
+        delay(1200)
+        state = service.getScreenStateJson()
+        val unlocked = state["keyguard_locked"]?.jsonPrimitive?.booleanOrNull == false
+        val result = buildJsonObject {
+            put("status", if (unlocked) "ok" else "error")
+            put("unlocked", unlocked)
+            put("pin_input_attempted", digitsOk)
+            if (!unlocked) {
+                put("error_code", if (digitsOk) "KEYGUARD_UNLOCK_NOT_CONFIRMED" else "KEYGUARD_INPUT_BLOCKED")
+                put("message", if (digitsOk) {
+                    "PIN was entered but keyguard is still locked"
+                } else {
+                    "PIN input blocked or lockscreen keypad was not accessible"
+                })
+            }
+            put("screen_state", state)
+        }
+        return if (unlocked) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private fun isPinKeypadVisible(): Boolean =
+        findNodeByResourceId("com.android.systemui:id/fixedPinEntry", 0) != null ||
+            findNodeByResourceId("com.android.systemui:id/keyguard_fixed_length_pin_view", 0) != null ||
+            findNodeByResourceId("com.android.systemui:id/key9", 0) != null
+
+    private suspend fun inputPinDigits(pin: String): Boolean {
+        clearPinEntry()
+        var clickedAny = false
+        for (digit in pin) {
+            val node = findNodeByResourceId("com.android.systemui:id/key$digit", 0)
+                ?: findNodeByText(digit.toString(), "exact", 0)
+            val clicked = if (node != null) {
+                clickNode(node)
+            } else {
+                tapApproximateKeypadDigit(digit)
+            }
+            clickedAny = clickedAny || clicked
+            if (!clicked) return false
+            delay(300)
+        }
+        findNodeByText("OK", "exact", 0)?.let {
+            clickNode(it)
+            delay(200)
+        } ?: findNodeByText("确认", "exact", 0)?.let {
+            clickNode(it)
+            delay(200)
+        }
+        return clickedAny
+    }
+
+    private suspend fun clearPinEntry() {
+        repeat(8) {
+            val entryText = findNodeByResourceId("com.android.systemui:id/fixedPinEntry", 0)
+                ?.text
+                ?.toString()
+                .orEmpty()
+            if (entryText.isEmpty()) return
+            val deleteNode = findNodeByResourceId("com.android.systemui:id/delete_button", 0)
+                ?: findNodeByText("删除", "exact", 0)
+                ?: return
+            if (!clickNode(deleteNode)) return
+            delay(120)
+        }
+    }
+
+    private suspend fun tapApproximateKeypadDigit(digit: Char): Boolean {
+        val dm = service.resources.displayMetrics
+        val columns = listOf(dm.widthPixels * 0.25f, dm.widthPixels * 0.5f, dm.widthPixels * 0.75f)
+        val rows = listOf(dm.heightPixels * 0.58f, dm.heightPixels * 0.68f, dm.heightPixels * 0.78f, dm.heightPixels * 0.88f)
+        val position = when (digit) {
+            '1' -> 0 to 0
+            '2' -> 1 to 0
+            '3' -> 2 to 0
+            '4' -> 0 to 1
+            '5' -> 1 to 1
+            '6' -> 2 to 1
+            '7' -> 0 to 2
+            '8' -> 1 to 2
+            '9' -> 2 to 2
+            '0' -> 1 to 3
+            else -> return false
+        }
+        return executeGestureAndWait { cb ->
+            gestureEngine.executeTap(columns[position.first], rows[position.second], cb)
+        }
+    }
+
+    private fun handleKeepAwake(args: JsonObject): McpToolCallResult {
+        val enabled = args["enabled"]?.jsonPrimitive?.booleanOrNull
+            ?: return errorResult("enabled (boolean) required")
+        val mode = args["mode"]?.jsonPrimitive?.contentOrNull ?: "partial"
+        val result = service.setExecutorKeepAwakeJson(enabled, mode)
+        return textResult(result.toString())
     }
 
 }

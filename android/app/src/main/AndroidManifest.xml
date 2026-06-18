@@ -7,6 +7,7 @@
 
     <!-- Keep screen on while MCP client is connected -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Foreground service for keeping AccessibilityService alive -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

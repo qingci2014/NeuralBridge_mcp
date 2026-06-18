@@ -246,11 +246,11 @@ class McpHttpServer(
         toolName in setOf("android_get_ui_tree", "android_screenshot", "android_find_elements",
             "android_get_screen_context", "android_get_notifications", "android_screenshot_diff",
             "android_accessibility_audit", "android_get_recent_toasts", "android_get_device_info",
-            "android_list_devices") -> CommandLog.Category.OBSERVE
+            "android_get_screen_state", "android_list_devices") -> CommandLog.Category.OBSERVE
         toolName in setOf("android_wait_for_element", "android_wait_for_gone",
             "android_wait_for_idle", "android_scroll_to_element") -> CommandLog.Category.WAIT
         toolName in setOf("android_input_text", "android_press_key",
-            "android_global_action") -> CommandLog.Category.INPUT
+            "android_global_action", "android_wake_screen", "android_unlock_device") -> CommandLog.Category.INPUT
         else -> CommandLog.Category.MANAGE
     }
 

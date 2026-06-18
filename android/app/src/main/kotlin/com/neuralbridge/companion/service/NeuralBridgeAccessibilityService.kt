@@ -22,6 +22,7 @@ import com.neuralbridge.companion.screenshot.ScreenshotPipeline
 import com.neuralbridge.companion.mcp.CloudGatewayClient
 import com.neuralbridge.companion.mcp.McpHttpServer
 import com.neuralbridge.companion.mcp.McpToolHandler
+import com.neuralbridge.companion.power.DevicePowerController
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -76,6 +77,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     private var mcpHttpServer: McpHttpServer? = null
     private var cloudGatewayClient: CloudGatewayClient? = null
     private var currentToolHandler: McpToolHandler? = null
+    private lateinit var powerController: DevicePowerController
 
     // Event listener for UI changes (CopyOnWriteArrayList for thread-safe iteration from onAccessibilityEvent)
     private val eventListeners = java.util.concurrent.CopyOnWriteArrayList<AccessibilityEventListener>()
@@ -134,6 +136,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         inputEngine = InputEngine(this)
         uiTreeWalker = UiTreeWalker(this)
         screenshotPipeline = ScreenshotPipeline(this, serviceScope)
+        powerController = DevicePowerController(this)
+        powerController.restoreConfiguredKeepAwake()
 
         // Update notification when MediaProjection session is lost by the system
         screenshotPipeline.onMediaProjectionLost = {
@@ -176,6 +180,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         val enabled = prefs.getBoolean("cloud_enabled", false)
         if (!enabled) {
             Log.i(TAG, "Cloud gateway client disabled")
+            powerController.setCloudPollingKeepAlive(false)
             return
         }
 
@@ -190,9 +195,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         if (gatewayUrl.isEmpty() || token.isEmpty()) {
             Log.w(TAG, "Cloud gateway enabled but cloud_gateway_url or cloud_token is missing")
+            powerController.setCloudPollingKeepAlive(false)
             return
         }
 
+        powerController.setCloudPollingKeepAlive(true)
         cloudGatewayClient?.stop()
         cloudGatewayClient = CloudGatewayClient(
             scope = serviceScope,
@@ -409,6 +416,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         // Release screen wake lock synchronously before scope cancellation
         mcpHttpServer?.releaseScreenWakeLock()
+        if (::powerController.isInitialized) {
+            powerController.releaseAll()
+        }
 
         // Clean up screenshot pipeline synchronously (releases VirtualDisplay, ImageReader, MediaProjection)
         if (::screenshotPipeline.isInitialized) {
@@ -534,6 +544,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         stopForeground(true)
         cloudGatewayClient?.stop()
         cloudGatewayClient = null
+        if (::powerController.isInitialized) {
+            powerController.releaseAll()
+        }
         mcpHttpServer?.releaseScreenWakeLock()
         serviceScope.launch {
             mcpHttpServer?.stop()
@@ -580,6 +593,15 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     fun hasMediaProjectionPermission(): Boolean {
         return if (::screenshotPipeline.isInitialized) screenshotPipeline.hasMediaProjectionPermission() else false
     }
+
+    fun getScreenStateJson(): kotlinx.serialization.json.JsonObject =
+        powerController.getScreenState()
+
+    fun wakeScreenJson(): kotlinx.serialization.json.JsonObject =
+        powerController.wakeScreen()
+
+    fun setExecutorKeepAwakeJson(enabled: Boolean, mode: String): kotlinx.serialization.json.JsonObject =
+        powerController.setExecutorKeepAwake(enabled, mode)
 
     /**
      * Check if enough time has passed since last event (throttling)

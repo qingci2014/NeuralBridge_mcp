@@ -517,6 +517,39 @@ object McpToolRegistry {
             inputSchema = buildJsonObject { put("type", "object"); putJsonObject("properties") {} }
         ),
         McpToolDefinition(
+            name = "android_get_screen_state",
+            description = "Return current screen, keyguard, device idle, battery optimization, and executor keep-awake state.",
+            inputSchema = buildJsonObject { put("type", "object"); putJsonObject("properties") {} }
+        ),
+        McpToolDefinition(
+            name = "android_wake_screen",
+            description = "Best-effort wake the device screen and return the resulting screen state.",
+            inputSchema = buildJsonObject { put("type", "object"); putJsonObject("properties") {} }
+        ),
+        McpToolDefinition(
+            name = "android_unlock_device",
+            description = "Best-effort numeric PIN unlock: wake screen, swipe up, enter PIN, and return explicit success or error code.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("pin") { put("type", "string"); put("description", "Numeric lockscreen PIN") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("pin")) }
+            }
+        ),
+        McpToolDefinition(
+            name = "android_keep_awake",
+            description = "Enable or disable executor keep-awake mode. mode=partial keeps CPU awake; mode=screen_on also tries to keep the screen bright.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("enabled") { put("type", "boolean"); put("description", "Enable keep-awake mode") }
+                    putJsonObject("mode") { put("type", "string"); put("description", "partial or screen_on") }
+                }
+                putJsonArray("required") { add(JsonPrimitive("enabled")) }
+            }
+        ),
+        McpToolDefinition(
             name = "android_get_installed_package",
             description = "Check whether a package is installed and return version information when available.",
             inputSchema = buildJsonObject {
