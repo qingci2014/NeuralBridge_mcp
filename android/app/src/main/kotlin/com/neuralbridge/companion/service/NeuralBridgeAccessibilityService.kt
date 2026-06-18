@@ -201,6 +201,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         }
 
         powerController.setCloudPollingKeepAlive(true)
+        Log.i(TAG, "Starting cloud gateway client from accessibility service")
         cloudGatewayClient?.stop()
         cloudGatewayClient = CloudGatewayClient(
             scope = serviceScope,
@@ -216,9 +217,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
     fun refreshCloudGatewayClient() {
         val toolHandler = currentToolHandler ?: return
+        Log.w(TAG, "Refreshing cloud gateway client: previous=${cloudGatewayClient?.describeState() ?: "none"}")
         cloudGatewayClient?.stop()
         cloudGatewayClient = null
         startCloudGatewayClient(toolHandler)
+        Log.w(TAG, "Cloud gateway client refreshed: current=${cloudGatewayClient?.describeState() ?: "none"}")
         if (isEnabled()) {
             ExecutorKeepAliveService.start(this)
         }
@@ -230,8 +233,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Cannot ensure cloud gateway client: tool handler not ready ($reason)")
             return
         }
-        if (cloudGatewayClient?.isHealthy(maxQuietMs = 45_000L) == true) return
-        Log.w(TAG, "Cloud gateway client not healthy; restarting ($reason)")
+        if (cloudGatewayClient?.isHealthy(maxQuietMs = 45_000L) == true) {
+            Log.i(TAG, "Cloud gateway client healthy ($reason): ${cloudGatewayClient?.describeState()}")
+            return
+        }
+        Log.w(TAG, "Cloud gateway client not healthy; restarting ($reason): ${cloudGatewayClient?.describeState() ?: "none"}")
         refreshCloudGatewayClient()
     }
 
