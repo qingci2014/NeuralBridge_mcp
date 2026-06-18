@@ -33,6 +33,7 @@ import com.neuralbridge.companion.adapter.LogAdapter
 import com.neuralbridge.companion.log.CommandLog
 import com.neuralbridge.companion.mcp.McpHttpServer
 import com.neuralbridge.companion.mcp.McpNetworkUtils
+import com.neuralbridge.companion.service.ExecutorKeepAliveService
 import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 
 class MainActivity : Activity() {
@@ -154,6 +155,9 @@ class MainActivity : Activity() {
         editor.apply()
 
         NeuralBridgeAccessibilityService.instance?.refreshCloudGatewayClient()
+        if (prefs.getBoolean(KEY_ENABLED, false) && prefs.getBoolean("cloud_enabled", false)) {
+            ExecutorKeepAliveService.start(this)
+        }
         Toast.makeText(this, "Cloud gateway config updated", Toast.LENGTH_SHORT).show()
         Log.i("NeuralBridge", "Cloud gateway config updated from launch intent")
     }
@@ -260,8 +264,10 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean(KEY_ENABLED, isChecked).apply()
             if (isChecked) {
                 requestNotificationPermissionIfNeeded()
+                ExecutorKeepAliveService.start(this)
                 NeuralBridgeAccessibilityService.instance?.enable()
             } else {
+                ExecutorKeepAliveService.stop(this)
                 NeuralBridgeAccessibilityService.instance?.disable()
             }
             updateServiceStatus()

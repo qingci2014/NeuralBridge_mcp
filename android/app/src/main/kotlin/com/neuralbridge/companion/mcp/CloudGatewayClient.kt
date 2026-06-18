@@ -58,9 +58,12 @@ class CloudGatewayClient(
     }
 
     private var job: Job? = null
+    @Volatile
+    private var lastActivityAtMs: Long = 0L
 
     fun start() {
         if (job?.isActive == true) return
+        touchActivity()
         job = scope.launch {
             Log.i(TAG, "Starting cloud gateway client: ${config.gatewayUrl}")
             while (isActive) {
@@ -80,6 +83,11 @@ class CloudGatewayClient(
         job = null
     }
 
+    fun isRunning(): Boolean = job?.isActive == true
+
+    fun isHealthy(maxQuietMs: Long = 90_000L): Boolean =
+        isRunning() && System.currentTimeMillis() - lastActivityAtMs <= maxQuietMs
+
     private suspend fun pollLoop() {
         while (scope.coroutineContext.isActive) {
             val task = pollTask() ?: continue
@@ -88,19 +96,23 @@ class CloudGatewayClient(
     }
 
     private suspend fun register() {
+        touchActivity()
         val body = buildJsonObject {
             put("device_id", config.deviceId)
             put("name", config.deviceName)
             put("executor_version", "neuralbridge-cloud-0.1")
         }
         postJson("/device/register", body, 10_000)
+        touchActivity()
         Log.i(TAG, "Registered cloud device: ${config.deviceId}")
     }
 
     private suspend fun pollTask(): JsonObject? {
+        touchActivity()
         val device = urlEncode(config.deviceId)
         val path = "/device/$device/poll?timeout_ms=${config.pollTimeoutMs}"
         val response = requestJson("GET", path, null, config.pollTimeoutMs + 5_000)
+        touchActivity()
         if (response.statusCode == HttpURLConnection.HTTP_NO_CONTENT) return null
         if (response.statusCode !in 200..299) {
             throw IllegalStateException("Poll failed: HTTP ${response.statusCode} ${response.body}")
@@ -176,7 +188,13 @@ class CloudGatewayClient(
         }
 
         val device = urlEncode(config.deviceId)
+        touchActivity()
         postJson("/device/$device/result", result, 15_000)
+        touchActivity()
+    }
+
+    private fun touchActivity() {
+        lastActivityAtMs = System.currentTimeMillis()
     }
 
     private fun buildResultBody(

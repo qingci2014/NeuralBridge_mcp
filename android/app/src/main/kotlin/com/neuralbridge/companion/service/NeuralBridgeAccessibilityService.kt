@@ -111,6 +111,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         // MediaProjection consent is no longer requested automatically; the
         // AccessibilityService screenshot fallback avoids repeated system popups.
         if (isEnabled()) {
+            ExecutorKeepAliveService.start(this)
             startForegroundService()
             startMcpHttpServer()
         }
@@ -218,6 +219,20 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         cloudGatewayClient?.stop()
         cloudGatewayClient = null
         startCloudGatewayClient(toolHandler)
+        if (isEnabled()) {
+            ExecutorKeepAliveService.start(this)
+        }
+    }
+
+    fun ensureCloudGatewayClientRunning(reason: String = "keepalive") {
+        if (!isEnabled()) return
+        if (currentToolHandler == null) {
+            Log.w(TAG, "Cannot ensure cloud gateway client: tool handler not ready ($reason)")
+            return
+        }
+        if (cloudGatewayClient?.isHealthy() == true) return
+        Log.w(TAG, "Cloud gateway client not healthy; restarting ($reason)")
+        refreshCloudGatewayClient()
     }
 
     /**
@@ -527,6 +542,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
      * Start MCP server — called when user turns on the master toggle
      */
     fun enable() {
+        ExecutorKeepAliveService.start(this)
         startForegroundService()
         startMcpHttpServer()
     }
@@ -542,6 +558,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         @Suppress("DEPRECATION")
         stopForeground(true)
+        ExecutorKeepAliveService.stop(this)
         cloudGatewayClient?.stop()
         cloudGatewayClient = null
         if (::powerController.isInitialized) {
