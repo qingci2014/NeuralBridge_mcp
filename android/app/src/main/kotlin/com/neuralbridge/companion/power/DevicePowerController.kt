@@ -37,6 +37,16 @@ class DevicePowerController(private val context: Context) {
         setExecutorKeepAwake(enabled, mode)
     }
 
+    fun ensureConfiguredKeepAwake(cloudPollingEnabled: Boolean): JsonObject {
+        setCloudPollingKeepAlive(cloudPollingEnabled)
+        if (cloudPollingEnabled) {
+            setExecutorKeepAwake(enabled = true, mode = "partial")
+        } else {
+            restoreConfiguredKeepAwake()
+        }
+        return getScreenState()
+    }
+
     fun setCloudPollingKeepAlive(enabled: Boolean) {
         if (enabled) {
             pollingWakeLock = acquireWakeLock(

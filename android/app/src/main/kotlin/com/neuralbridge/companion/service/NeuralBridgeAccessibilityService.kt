@@ -200,7 +200,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             return
         }
 
-        powerController.setCloudPollingKeepAlive(true)
+        val powerState = powerController.ensureConfiguredKeepAwake(cloudPollingEnabled = true)
+        Log.i(TAG, "KeepAwakeWatchdog.reassert reason=start-cloud state=$powerState")
         Log.i(TAG, "Starting cloud gateway client from accessibility service")
         cloudGatewayClient?.stop("replace-client")
         cloudGatewayClient = CloudGatewayClient(
@@ -233,6 +234,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Cannot ensure cloud gateway client: tool handler not ready ($reason)")
             return
         }
+        val powerState = powerController.ensureConfiguredKeepAwake(cloudPollingEnabled = true)
+        Log.i(TAG, "KeepAwakeWatchdog.reassert reason=$reason state=$powerState")
         if (cloudGatewayClient?.isHealthy(maxQuietMs = 45_000L) == true) {
             Log.i(TAG, "Cloud gateway client healthy ($reason): ${cloudGatewayClient?.describeState()}")
             return
