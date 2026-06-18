@@ -2,6 +2,7 @@ package com.neuralbridge.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -379,6 +380,20 @@ class MainActivity : Activity() {
                 requestNotificationPermissionIfNeeded()
             }
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            addPermissionCard("Wake Notifications", "Allow lockscreen full-screen wake alerts") {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                        data = Uri.parse("package:$packageName")
+                    })
+                } catch (e: Exception) {
+                    Log.w("MainActivity", "Full-screen intent settings not available", e)
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                    })
+                }
+            }
+        }
         addPermissionCard("Battery Optimization", "Prevent Android from killing the service") {
             try {
                 startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
@@ -418,6 +433,7 @@ class MainActivity : Activity() {
             add(isAccessibilityServiceEnabled())
             add(isNotificationListenerEnabled())
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(isPostNotificationsGranted())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) add(isFullScreenIntentAllowed())
             add(isBatteryOptimizationExempt())
             add(NeuralBridgeAccessibilityService.instance?.hasMediaProjectionPermission() ?: false)
         }
@@ -527,6 +543,12 @@ class MainActivity : Activity() {
     private fun isBatteryOptimizationExempt(): Boolean {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun isFullScreenIntentAllowed(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+        } else true
     }
 
     private fun requestNotificationPermissionIfNeeded() {

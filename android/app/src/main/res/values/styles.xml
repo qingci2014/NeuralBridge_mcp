@@ -298,6 +298,15 @@
         <item name="trackCornerRadius">@dimen/corner_radius_small</item>
     </style>
 
+    <style name="Theme.NeuralBridge.Wake" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:colorAccent">@android:color/transparent</item>
+    </style>
+
     <!-- ============================================ -->
     <!-- Divider Styles -->
     <!-- ============================================ -->

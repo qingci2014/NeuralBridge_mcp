@@ -17,6 +17,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Notification listener for full notification content -->
     <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
@@ -68,6 +69,16 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:taskAffinity="" />
 
+        <activity
+            android:name=".wake.WakeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.NeuralBridge.Wake"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="" />
+
         <!-- AccessibilityService - Core automation service -->
         <service
             android:name=".service.NeuralBridgeAccessibilityService"
@@ -111,6 +122,14 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".wake.WakeSignalReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.neuralbridge.companion.action.WAKE_SIGNAL" />
             </intent-filter>
         </receiver>
 
