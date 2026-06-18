@@ -230,7 +230,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Cannot ensure cloud gateway client: tool handler not ready ($reason)")
             return
         }
-        if (cloudGatewayClient?.isHealthy() == true) return
+        if (cloudGatewayClient?.isHealthy(maxQuietMs = 45_000L) == true) return
         Log.w(TAG, "Cloud gateway client not healthy; restarting ($reason)")
         refreshCloudGatewayClient()
     }

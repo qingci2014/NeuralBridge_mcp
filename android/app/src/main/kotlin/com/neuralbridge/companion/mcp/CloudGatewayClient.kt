@@ -3,9 +3,11 @@ package com.neuralbridge.companion.mcp
 import android.util.Log
 import com.neuralbridge.companion.log.CommandLog
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -60,25 +62,39 @@ class CloudGatewayClient(
     private var job: Job? = null
     @Volatile
     private var lastActivityAtMs: Long = 0L
+    @Volatile
+    private var lastPollStartedAtMs: Long = 0L
 
     fun start() {
         if (job?.isActive == true) return
         touchActivity()
         job = scope.launch {
             Log.i(TAG, "Starting cloud gateway client: ${config.gatewayUrl}")
-            while (isActive) {
+            while (currentCoroutineContext().isActive) {
                 try {
                     register()
                     pollLoop()
+                } catch (e: CancellationException) {
+                    Log.w(TAG, "Cloud gateway loop cancelled: ${e.message}", e)
+                    throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "Cloud gateway loop failed: ${e.message}", e)
                     delay(RETRY_DELAY_MS)
+                }
+            }
+        }.also { pollingJob ->
+            pollingJob.invokeOnCompletion { cause ->
+                if (cause == null) {
+                    Log.w(TAG, "Cloud gateway job completed without error")
+                } else {
+                    Log.w(TAG, "Cloud gateway job completed: ${cause.message}", cause)
                 }
             }
         }
     }
 
     fun stop() {
+        Log.i(TAG, "Stopping cloud gateway client")
         job?.cancel()
         job = null
     }
@@ -89,10 +105,16 @@ class CloudGatewayClient(
         isRunning() && System.currentTimeMillis() - lastActivityAtMs <= maxQuietMs
 
     private suspend fun pollLoop() {
-        while (scope.coroutineContext.isActive) {
-            val task = pollTask() ?: continue
+        Log.i(TAG, "Cloud poll loop entered")
+        while (currentCoroutineContext().isActive) {
+            val task = pollTask()
+            if (task == null) {
+                Log.i(TAG, "Cloud poll no_task; continuing next poll")
+                continue
+            }
             executeAndReport(task)
         }
+        Log.w(TAG, "Cloud poll loop exited: coroutine inactive")
     }
 
     private suspend fun register() {
@@ -111,13 +133,17 @@ class CloudGatewayClient(
         touchActivity()
         val device = urlEncode(config.deviceId)
         val path = "/device/$device/poll?timeout_ms=${config.pollTimeoutMs}"
+        lastPollStartedAtMs = System.currentTimeMillis()
+        Log.i(TAG, "Cloud poll request start: ${config.gatewayUrl.trimEnd('/')}$path")
         val response = requestJson("GET", path, null, config.pollTimeoutMs + 5_000)
         touchActivity()
+        Log.i(TAG, "Cloud poll response: HTTP ${response.statusCode} in ${System.currentTimeMillis() - lastPollStartedAtMs}ms")
         if (response.statusCode == HttpURLConnection.HTTP_NO_CONTENT) return null
         if (response.statusCode !in 200..299) {
             throw IllegalStateException("Poll failed: HTTP ${response.statusCode} ${response.body}")
         }
         val body = response.body ?: return null
+        Log.i(TAG, "Cloud poll task received")
         return json.parseToJsonElement(body).jsonObject
     }
 
@@ -189,8 +215,9 @@ class CloudGatewayClient(
 
         val device = urlEncode(config.deviceId)
         touchActivity()
-        postJson("/device/$device/result", result, 15_000)
+        val response = postJson("/device/$device/result", result, 15_000)
         touchActivity()
+        Log.i(TAG, "Cloud result posted: task=$taskId tool=$tool status=${result["status"]?.jsonPrimitive?.contentOrNull} HTTP ${response.statusCode}")
     }
 
     private fun touchActivity() {
@@ -230,6 +257,7 @@ class CloudGatewayClient(
         timeoutMs: Long
     ): HttpResponse = withContext(Dispatchers.IO) {
         val url = URL(config.gatewayUrl.trimEnd('/') + path)
+        val startedAt = System.currentTimeMillis()
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = timeoutMs.toInt()
@@ -255,6 +283,7 @@ class CloudGatewayClient(
             val responseBody = stream?.use { input ->
                 BufferedReader(InputStreamReader(input, Charsets.UTF_8)).readText()
             }
+            Log.i(TAG, "Cloud HTTP $method $path -> $statusCode in ${System.currentTimeMillis() - startedAt}ms")
             HttpResponse(statusCode, responseBody)
         } finally {
             connection.disconnect()
