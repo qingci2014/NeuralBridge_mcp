@@ -1381,31 +1381,18 @@ class McpToolHandler(
             }.toString())
         }
 
-        val dm = service.resources.displayMetrics
-        val centerX = dm.widthPixels / 2f
-        val startY = dm.heightPixels * 0.97f
-        val endY = dm.heightPixels * 0.05f
-        val swiped = executeGestureAndWait { cb ->
-            gestureEngine.executeSwipe(centerX, startY, centerX, endY, 900L, cb)
-        }
-        if (!swiped) {
+        val keypadVisible = revealPinKeypad()
+        if (!keypadVisible) {
             return errorResult(buildJsonObject {
                 put("status", "error")
-                put("error_code", "KEYGUARD_SWIPE_FAILED")
-                put("message", "Unable to swipe up on lockscreen")
+                put("error_code", "KEYGUARD_KEYPAD_NOT_VISIBLE")
+                put("message", "Unable to reveal lockscreen PIN keypad")
                 put("screen_state", service.getScreenStateJson())
             }.toString())
         }
-        delay(900)
-        if (!isPinKeypadVisible()) {
-            executeGestureAndWait { cb ->
-                gestureEngine.executeSwipe(centerX, startY, centerX, endY, 900L, cb)
-            }
-            delay(900)
-        }
 
         val digitsOk = inputPinDigits(pin)
-        delay(1200)
+        delay(2200)
         state = service.getScreenStateJson()
         val unlocked = state["keyguard_locked"]?.jsonPrimitive?.booleanOrNull == false
         val result = buildJsonObject {
@@ -1423,6 +1410,35 @@ class McpToolHandler(
             put("screen_state", state)
         }
         return if (unlocked) textResult(result.toString()) else errorResult(result.toString())
+    }
+
+    private suspend fun revealPinKeypad(): Boolean {
+        if (isPinKeypadVisible()) return true
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            service.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE
+            )
+            delay(500)
+            if (isPinKeypadVisible()) return true
+        }
+        val rootBounds = Rect()
+        service.rootInActiveWindow?.getBoundsInScreen(rootBounds)
+        val dm = service.resources.displayMetrics
+        val left = if (rootBounds.width() > 0) rootBounds.left else 0
+        val top = if (rootBounds.height() > 0) rootBounds.top else 0
+        val width = if (rootBounds.width() > 0) rootBounds.width() else dm.widthPixels
+        val height = if (rootBounds.height() > 0) rootBounds.height() else dm.heightPixels
+        val centerX = left + width / 2f
+        val startY = top + height * 0.973f
+        val endY = top + height * 0.045f
+        repeat(4) {
+            val swiped = executeGestureAndWait { cb ->
+                gestureEngine.executeSwipe(centerX, startY, centerX, endY, 1100L, cb)
+            }
+            delay(1400)
+            if (swiped && isPinKeypadVisible()) return true
+        }
+        return false
     }
 
     private fun isPinKeypadVisible(): Boolean =
