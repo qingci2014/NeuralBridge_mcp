@@ -202,7 +202,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         powerController.setCloudPollingKeepAlive(true)
         Log.i(TAG, "Starting cloud gateway client from accessibility service")
-        cloudGatewayClient?.stop()
+        cloudGatewayClient?.stop("replace-client")
         cloudGatewayClient = CloudGatewayClient(
             scope = serviceScope,
             toolHandler = toolHandler,
@@ -218,7 +218,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     fun refreshCloudGatewayClient() {
         val toolHandler = currentToolHandler ?: return
         Log.w(TAG, "Refreshing cloud gateway client: previous=${cloudGatewayClient?.describeState() ?: "none"}")
-        cloudGatewayClient?.stop()
+        cloudGatewayClient?.stop("refresh")
         cloudGatewayClient = null
         startCloudGatewayClient(toolHandler)
         Log.w(TAG, "Cloud gateway client refreshed: current=${cloudGatewayClient?.describeState() ?: "none"}")
@@ -237,8 +237,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
             Log.i(TAG, "Cloud gateway client healthy ($reason): ${cloudGatewayClient?.describeState()}")
             return
         }
-        Log.w(TAG, "Cloud gateway client not healthy; restarting ($reason): ${cloudGatewayClient?.describeState() ?: "none"}")
+        Log.w(TAG, "PollingWatchdog.restart_begin reason=$reason state=${cloudGatewayClient?.describeState() ?: "none"}")
         refreshCloudGatewayClient()
+        Log.w(TAG, "PollingWatchdog.restart_end reason=$reason state=${cloudGatewayClient?.describeState() ?: "none"}")
     }
 
     /**
@@ -429,10 +430,16 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         Log.w(TAG, "AccessibilityService interrupted")
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        Log.w(TAG, "NeuralBridgeAccessibilityService.onUnbind intent=${intent?.action ?: "none"}")
+        return super.onUnbind(intent)
+    }
+
     /**
      * Service destroyed
      */
     override fun onDestroy() {
+        Log.i(TAG, "NeuralBridgeAccessibilityService.onDestroy")
         Log.i(TAG, "Service shutting down")
 
         // Release screen wake lock synchronously before scope cancellation
@@ -565,7 +572,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         @Suppress("DEPRECATION")
         stopForeground(true)
         ExecutorKeepAliveService.stop(this)
-        cloudGatewayClient?.stop()
+        cloudGatewayClient?.stop("disable")
         cloudGatewayClient = null
         if (::powerController.isInitialized) {
             powerController.releaseAll()

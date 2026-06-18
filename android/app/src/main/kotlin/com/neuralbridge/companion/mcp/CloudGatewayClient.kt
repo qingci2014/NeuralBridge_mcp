@@ -12,6 +12,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -55,6 +56,14 @@ class CloudGatewayClient(
         private val NEXT_JOB_ID = AtomicInteger(1)
     }
 
+    enum class State {
+        STOPPED,
+        STARTING,
+        RUNNING,
+        BACKOFF,
+        STOPPING
+    }
+
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -68,57 +77,96 @@ class CloudGatewayClient(
     @Volatile
     private var lastPollStartedAtMs: Long = 0L
     @Volatile
+    private var lastPollResponseAtMs: Long = 0L
+    @Volatile
+    private var lastLoopTickAtMs: Long = 0L
+    @Volatile
+    private var lastRegisterAtMs: Long = 0L
+    @Volatile
     private var activePollStartedAtMs: Long = 0L
+    @Volatile
+    private var state: State = State.STOPPED
+    @Volatile
+    private var currentLoopId: Int = 0
+    @Volatile
+    private var lastExitReason: String = "not_started"
+    private val pollSeq = AtomicLong(0L)
 
     @Synchronized
-    fun start() {
+    fun start(reason: String = "start") {
         if (job?.isActive == true) {
-            Log.i(TAG, "Cloud gateway client already running: ${job}")
+            Log.i(TAG, "CloudPollingManager.ensureStart reason=$reason result=already_running ${describeState()}")
             return
         }
         touchActivity()
         val jobId = NEXT_JOB_ID.getAndIncrement()
+        currentLoopId = jobId
+        pollSeq.set(0L)
+        lastExitReason = "running"
+        setState(State.STARTING, reason)
         job = scope.launch {
-            Log.i(TAG, "Cloud gateway client start: job=$jobId url=${config.gatewayUrl}")
+            Log.i(TAG, "CloudPollingManager.ensureStart reason=$reason result=launch loopId=$jobId url=${config.gatewayUrl}")
             while (currentCoroutineContext().isActive) {
                 try {
-                    Log.i(TAG, "Cloud gateway loop before register: job=$jobId")
-                    register()
-                    Log.i(TAG, "Cloud gateway loop after register: job=$jobId")
-                    Log.i(TAG, "Cloud poll loop entered: job=$jobId")
+                    register(reason)
+                    setState(State.RUNNING, "register_success")
+                    Log.i(TAG, "CloudPollingManager.loop_enter loopId=$jobId")
                     while (currentCoroutineContext().isActive) {
-                        val task = pollTask()
+                        touchLoopTick()
+                        val seq = pollSeq.incrementAndGet()
+                        val task = pollTask(jobId, seq)
                         if (task == null) {
-                            Log.i(TAG, "Cloud poll no_task; continuing next poll: job=$jobId")
+                            Log.i(TAG, "CloudPollingManager.no_task_continue loopId=$jobId seq=$seq")
                             continue
                         }
-                        executeAndReport(task)
+                        executeAndReport(task, jobId, seq)
                     }
+                    lastExitReason = "coroutine_inactive"
+                    Log.w(TAG, "CloudPollingManager.loop_exit loopId=$jobId reason=coroutine_inactive isActive=${currentCoroutineContext().isActive}")
                 } catch (e: CancellationException) {
-                    Log.w(TAG, "Cloud gateway loop cancelled: job=$jobId message=${e.message}", e)
+                    lastExitReason = "cancelled:${e.message}"
+                    Log.w(TAG, "CloudPollingManager.cancelled loopId=$jobId seq=${pollSeq.get()} message=${e.message}", e)
                     throw e
                 } catch (e: Exception) {
-                    Log.w(TAG, "Cloud gateway loop failed; retrying: job=$jobId message=${e.message}", e)
+                    lastExitReason = "exception:${e.message}"
+                    setState(State.BACKOFF, "exception")
+                    Log.w(TAG, "CloudPollingManager.exception loopId=$jobId seq=${pollSeq.get()} message=${e.message}", e)
+                    Log.i(TAG, "CloudPollingManager.schedule_restart reason=backoff loopId=$jobId delay_ms=$RETRY_DELAY_MS")
                     delay(RETRY_DELAY_MS)
                 }
             }
         }.also { pollingJob ->
             pollingJob.invokeOnCompletion { cause ->
+                if (job === pollingJob) {
+                    state = State.STOPPED
+                    activePollStartedAtMs = 0L
+                }
                 if (cause == null) {
-                    Log.w(TAG, "Cloud gateway job completed without error: job=$jobId")
+                    Log.w(TAG, "CloudPollingManager.loop_exit loopId=$jobId reason=completed_without_error isActive=false")
                 } else {
-                    Log.w(TAG, "Cloud gateway job completed: job=$jobId message=${cause.message}", cause)
+                    Log.w(TAG, "CloudPollingManager.loop_exit loopId=$jobId reason=completed_with_cause message=${cause.message}", cause)
                 }
             }
         }
     }
 
     @Synchronized
-    fun stop() {
-        Log.i(TAG, "Cloud gateway client stop requested: job=$job active=${job?.isActive}")
+    fun stop(reason: String = "stop") {
+        setState(State.STOPPING, reason)
+        lastExitReason = reason
+        Log.i(TAG, "CloudPollingManager.stop reason=$reason job=$job active=${job?.isActive}")
         job?.cancel()
         job = null
         activePollStartedAtMs = 0L
+        setState(State.STOPPED, reason)
+    }
+
+    @Synchronized
+    fun restart(reason: String) {
+        Log.w(TAG, "CloudPollingManager.restart_begin reason=$reason previous=${describeState()}")
+        stop("restart:$reason")
+        start("restart:$reason")
+        Log.w(TAG, "CloudPollingManager.restart_end reason=$reason current=${describeState()}")
     }
 
     fun isRunning(): Boolean = job?.isActive == true
@@ -130,13 +178,14 @@ class CloudGatewayClient(
         val pollAgeMs = activePollStartedAtMs.takeIf { it > 0L }?.let { now - it }
         val activePollHealthy = pollAgeMs != null && pollAgeMs <= config.pollTimeoutMs + POLL_STALL_GRACE_MS
         val healthy = running && (quietMs <= maxQuietMs || activePollHealthy)
-        Log.i(TAG, "Cloud healthcheck: running=$running quiet_ms=$quietMs active_poll_age_ms=${pollAgeMs ?: -1} healthy=$healthy")
+        Log.i(TAG, "PollingWatchdog.tick lastPollStartAgeMs=${age(lastPollStartedAtMs, now)} lastPollResponseAgeMs=${age(lastPollResponseAtMs, now)} lastLoopTickAgeMs=${age(lastLoopTickAtMs, now)} jobActive=$running state=$state loopId=$currentLoopId seq=${pollSeq.get()}")
+        Log.i(TAG, if (healthy) "PollingWatchdog.ok" else "PollingWatchdog.stalled")
         return healthy
     }
 
     fun describeState(): String {
         val now = System.currentTimeMillis()
-        return "running=${isRunning()} quiet_ms=${now - lastActivityAtMs} active_poll_age_ms=${activePollStartedAtMs.takeIf { it > 0L }?.let { now - it } ?: -1}"
+        return "state=$state running=${isRunning()} loopId=$currentLoopId seq=${pollSeq.get()} quiet_ms=${now - lastActivityAtMs} last_poll_start_age_ms=${age(lastPollStartedAtMs, now)} last_poll_response_age_ms=${age(lastPollResponseAtMs, now)} last_loop_tick_age_ms=${age(lastLoopTickAtMs, now)} active_poll_age_ms=${activePollStartedAtMs.takeIf { it > 0L }?.let { now - it } ?: -1} last_exit_reason=$lastExitReason"
     }
 
     private fun markPollStarted(): Long {
@@ -154,6 +203,19 @@ class CloudGatewayClient(
         lastActivityAtMs = System.currentTimeMillis()
     }
 
+    private fun touchLoopTick() {
+        lastLoopTickAtMs = System.currentTimeMillis()
+    }
+
+    private fun setState(next: State, reason: String) {
+        if (state == next) return
+        Log.i(TAG, "CloudPollingManager.state_change from=$state to=$next reason=$reason loopId=$currentLoopId")
+        state = next
+    }
+
+    private fun age(timestampMs: Long, now: Long): Long =
+        if (timestampMs > 0L) now - timestampMs else -1L
+
     private suspend fun <T> withPollInFlight(block: suspend () -> T): T {
         markPollStarted()
         return try {
@@ -163,38 +225,54 @@ class CloudGatewayClient(
         }
     }
 
-    private suspend fun register() {
+    private suspend fun register(reason: String) {
         touchActivity()
+        Log.i(TAG, "CloudGatewayClient.register_start reason=$reason deviceId=${config.deviceId}")
         val body = buildJsonObject {
             put("device_id", config.deviceId)
             put("name", config.deviceName)
             put("executor_version", "neuralbridge-cloud-0.1")
         }
-        postJson("/device/register", body, 10_000)
+        try {
+            postJson("/device/register", body, 10_000)
+        } catch (e: Exception) {
+            Log.w(TAG, "CloudGatewayClient.register_failure deviceId=${config.deviceId} error=${e.message}", e)
+            throw e
+        }
         touchActivity()
-        Log.i(TAG, "Registered cloud device: ${config.deviceId}")
+        lastRegisterAtMs = System.currentTimeMillis()
+        Log.i(TAG, "CloudGatewayClient.register_success deviceId=${config.deviceId}")
+        Log.i(TAG, "CloudGatewayClient.after_register_ensure_polling loopId=$currentLoopId")
     }
 
-    private suspend fun pollTask(): JsonObject? {
+    private suspend fun pollTask(loopId: Int, seq: Long): JsonObject? {
         touchActivity()
         val device = urlEncode(config.deviceId)
         val path = "/device/$device/poll?timeout_ms=${config.pollTimeoutMs}"
-        Log.i(TAG, "Cloud poll request start: ${config.gatewayUrl.trimEnd('/')}$path")
-        val response = withPollInFlight {
-            requestJson("GET", path, null, config.pollTimeoutMs + 5_000)
+        Log.i(TAG, "CloudPollingManager.poll_start loopId=$loopId seq=$seq url=${config.gatewayUrl.trimEnd('/')}$path")
+        val response = try {
+            withPollInFlight {
+                requestJson("GET", path, null, config.pollTimeoutMs + 5_000)
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            lastPollResponseAtMs = System.currentTimeMillis()
+            Log.w(TAG, "CloudPollingManager.poll_response loopId=$loopId seq=$seq http=timeout kind=timeout message=${e.message}")
+            return null
         }
+        lastPollResponseAtMs = System.currentTimeMillis()
         touchActivity()
-        Log.i(TAG, "Cloud poll response: HTTP ${response.statusCode} in ${System.currentTimeMillis() - lastPollStartedAtMs}ms")
+        Log.i(TAG, "CloudPollingManager.poll_response loopId=$loopId seq=$seq http=${response.statusCode} kind=${if (response.statusCode == HttpURLConnection.HTTP_NO_CONTENT) "no_task" else "task_or_error"} duration_ms=${System.currentTimeMillis() - lastPollStartedAtMs}")
         if (response.statusCode == HttpURLConnection.HTTP_NO_CONTENT) return null
         if (response.statusCode !in 200..299) {
             throw IllegalStateException("Poll failed: HTTP ${response.statusCode} ${response.body}")
         }
         val body = response.body ?: return null
-        Log.i(TAG, "Cloud poll task received")
-        return json.parseToJsonElement(body).jsonObject
+        val task = json.parseToJsonElement(body).jsonObject
+        Log.i(TAG, "CloudPollingManager.task_received loopId=$loopId seq=$seq taskId=${task["task_id"]?.jsonPrimitive?.contentOrNull ?: ""} stepId=${task["step_id"]?.jsonPrimitive?.contentOrNull ?: ""} action=${task["action"]?.jsonPrimitive?.contentOrNull ?: ""}")
+        return task
     }
 
-    private suspend fun executeAndReport(task: JsonObject) {
+    private suspend fun executeAndReport(task: JsonObject, loopId: Int, seq: Long) {
         val taskId = task["task_id"]?.jsonPrimitive?.contentOrNull ?: ""
         val stepId = task["step_id"]?.jsonPrimitive?.contentOrNull ?: ""
         val action = task["action"]?.jsonPrimitive?.contentOrNull ?: ""
@@ -264,7 +342,7 @@ class CloudGatewayClient(
         touchActivity()
         val response = postJson("/device/$device/result", result, 15_000)
         touchActivity()
-        Log.i(TAG, "Cloud result posted: task=$taskId tool=$tool status=${result["status"]?.jsonPrimitive?.contentOrNull} HTTP ${response.statusCode}")
+        Log.i(TAG, "CloudPollingManager.task_result_posted loopId=$loopId seq=$seq taskId=$taskId stepId=$stepId tool=$tool status=${result["status"]?.jsonPrimitive?.contentOrNull} http=${response.statusCode}")
     }
 
     private fun buildResultBody(

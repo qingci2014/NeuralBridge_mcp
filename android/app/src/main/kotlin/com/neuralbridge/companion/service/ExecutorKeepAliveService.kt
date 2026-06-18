@@ -60,6 +60,7 @@ class ExecutorKeepAliveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "ExecutorKeepAliveService.onCreate")
         createNotificationChannel()
         startAsForeground()
         acquireLocks()
@@ -68,7 +69,9 @@ class ExecutorKeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "ExecutorKeepAliveService.onStartCommand intent=${intent?.action ?: "none"} flags=$flags startId=$startId")
         if (!isExecutorEnabled()) {
+            Log.w(TAG, "ExecutorKeepAliveService.onStartCommand disabled; stopping")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -81,10 +84,30 @@ class ExecutorKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        Log.i(TAG, "ExecutorKeepAliveService.onDestroy")
         releaseLocks()
         scope.cancel()
         Log.i(TAG, "Executor keepalive service stopped")
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.w(TAG, "ExecutorKeepAliveService.onTaskRemoved intent=${rootIntent?.action ?: "none"}")
+        if (isExecutorEnabled()) {
+            Log.w(TAG, "ExecutorKeepAliveService.restart_scheduled reason=task_removed")
+            start(this)
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onLowMemory() {
+        Log.w(TAG, "ExecutorKeepAliveService.onLowMemory")
+        super.onLowMemory()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        Log.w(TAG, "ExecutorKeepAliveService.onTrimMemory level=$level")
+        super.onTrimMemory(level)
     }
 
     private fun startMonitorLoop() {
@@ -99,6 +122,7 @@ class ExecutorKeepAliveService : Service() {
                 if (service == null) {
                     Log.w(TAG, "AccessibilityService instance unavailable during keepalive check")
                 } else {
+                    Log.i(TAG, "PollingWatchdog.tick service=available")
                     service.ensureCloudGatewayClientRunning("keepalive-loop")
                 }
                 delay(CHECK_INTERVAL_MS)
@@ -118,6 +142,7 @@ class ExecutorKeepAliveService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
+            Log.i(TAG, "ExecutorKeepAliveService.wakelock_acquired tag=$WAKE_LOCK_TAG")
         }
 
         try {
@@ -133,6 +158,7 @@ class ExecutorKeepAliveService : Service() {
                     setReferenceCounted(false)
                     acquire()
                 }
+                Log.i(TAG, "ExecutorKeepAliveService.wifi_lock_acquired tag=$WIFI_LOCK_TAG")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Unable to acquire Wi-Fi lock; continuing with CPU wake lock", e)
@@ -140,9 +166,15 @@ class ExecutorKeepAliveService : Service() {
     }
 
     private fun releaseLocks() {
-        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+            Log.i(TAG, "ExecutorKeepAliveService.wakelock_released tag=$WAKE_LOCK_TAG")
+        }
         wakeLock = null
-        if (wifiLock?.isHeld == true) wifiLock?.release()
+        if (wifiLock?.isHeld == true) {
+            wifiLock?.release()
+            Log.i(TAG, "ExecutorKeepAliveService.wifi_lock_released tag=$WIFI_LOCK_TAG")
+        }
         wifiLock = null
     }
 
@@ -157,6 +189,7 @@ class ExecutorKeepAliveService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        Log.i(TAG, "ExecutorKeepAliveService.startForeground.success")
     }
 
     private fun createNotificationChannel() {
