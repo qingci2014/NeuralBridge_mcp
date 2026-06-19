@@ -8,6 +8,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -113,6 +114,7 @@ class ScreenshotConsentActivity : Activity() {
                 pendingResultData = data
 
                 Log.i(TAG, "MediaProjection consent granted")
+                NeuralBridgeAccessibilityService.instance?.tryConsumeMediaProjectionConsent()
             } else {
                 Log.w(TAG, "MediaProjection consent denied or cancelled")
 

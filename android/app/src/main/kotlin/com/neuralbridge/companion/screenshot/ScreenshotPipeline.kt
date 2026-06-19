@@ -17,6 +17,7 @@ import android.util.Log
 import android.view.Display
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
+import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 import com.neuralbridge.companion.service.ScreenshotQuality
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,7 @@ class ScreenshotPipeline(
         val (resultCode, resultData) = result
         if (resultCode != Activity.RESULT_OK || resultData == null) return false
         return try {
+            prepareMediaProjectionForeground()
             val manager = accessibilityService.getSystemService(MediaProjectionManager::class.java)
             val projection = manager.getMediaProjection(resultCode, resultData)
             registerCallback(projection)
@@ -159,6 +161,15 @@ class ScreenshotPipeline(
         projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
     }
 
+    private fun prepareMediaProjectionForeground() {
+        val promoted = (accessibilityService as? NeuralBridgeAccessibilityService)
+            ?.promoteForegroundForMediaProjection()
+            ?: true
+        if (!promoted) {
+            Log.w(TAG, "MediaProjection foreground promotion failed; getMediaProjection may be rejected")
+        }
+    }
+
     /**
      * Capture screenshot
      *
@@ -169,59 +180,54 @@ class ScreenshotPipeline(
         withContext(Dispatchers.IO) {
             val startTime = System.currentTimeMillis()
 
-            try {
-                // Try MediaProjection path first. Android 14+ invalidates a
-                // projection if its virtual display has been torn down; when
-                // that happens, request fresh consent and retry once.
-                val bitmap = try {
-                    captureViaMediaProjection()
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "MediaProjection token invalid, requesting fresh consent", e)
+            val projection = mediaProjection
+            if (projection != null) {
+                try {
+                    val bitmap = captureViaMediaProjection(projection)
+                    try {
+                        val jpegBytes = encodeToJpeg(bitmap, quality)
+                        val elapsedMs = System.currentTimeMillis() - startTime
+                        Log.i(TAG, "Screenshot captured via MediaProjection: ${jpegBytes.size} bytes in ${elapsedMs}ms")
+                        return@withContext jpegBytes
+                    } finally {
+                        bitmap.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "MediaProjection capture failed; falling back without prompting", e)
                     releaseProjectionResources()
-                    captureViaMediaProjection()
                 }
+            } else {
+                Log.i(TAG, "MediaProjection not active; using AccessibilityService screenshot without prompting")
+            }
 
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                throw Exception(
+                    "Screenshot failed: MediaProjection is not active and device is below " +
+                    "Android 11 (API 30) so AccessibilityService fallback is not available. " +
+                    "Grant screenshot consent from the app setup screen."
+                )
+            }
+
+            try {
+                val bitmap = withTimeout(IMAGE_READER_TIMEOUT_MS) {
+                    captureViaAccessibilityService()
+                }
                 try {
                     val jpegBytes = encodeToJpeg(bitmap, quality)
                     val elapsedMs = System.currentTimeMillis() - startTime
-                    Log.i(TAG, "Screenshot captured: ${jpegBytes.size} bytes in ${elapsedMs}ms")
+                    Log.i(TAG, "Screenshot captured via AccessibilityService fallback: ${jpegBytes.size} bytes in ${elapsedMs}ms")
                     jpegBytes
                 } finally {
                     bitmap.recycle()
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "MediaProjection capture failed, trying AccessibilityService fallback", e)
-
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                    throw Exception(
-                        "Screenshot failed: MediaProjection unavailable and device is below " +
-                        "Android 11 (API 30) so AccessibilityService fallback is not available. " +
-                        "Grant screenshot consent via the system dialog.",
-                        e
-                    )
-                }
-
-                try {
-                    val bitmap = withTimeout(IMAGE_READER_TIMEOUT_MS) {
-                        captureViaAccessibilityService()
-                    }
-                    try {
-                        val jpegBytes = encodeToJpeg(bitmap, quality)
-                        val elapsedMs = System.currentTimeMillis() - startTime
-                        Log.i(TAG, "Screenshot captured via AccessibilityService fallback: ${jpegBytes.size} bytes in ${elapsedMs}ms")
-                        jpegBytes
-                    } finally {
-                        bitmap.recycle()
-                    }
-                } catch (fallbackError: Exception) {
-                    Log.e(TAG, "AccessibilityService fallback also failed", fallbackError)
-                    throw Exception(
-                        "Screenshot failed: MediaProjection unavailable and AccessibilityService " +
-                        "fallback failed. Grant screenshot consent via the system dialog, or " +
-                        "ensure Android 11+ for fallback.",
-                        fallbackError
-                    )
-                }
+            } catch (fallbackError: Exception) {
+                Log.e(TAG, "AccessibilityService fallback failed", fallbackError)
+                throw Exception(
+                    "Screenshot failed: MediaProjection is not active and AccessibilityService " +
+                    "fallback failed. Grant screenshot consent from the app setup screen, or " +
+                    "ensure Android 11+ for fallback.",
+                    fallbackError
+                )
             }
         }
     }
@@ -229,16 +235,9 @@ class ScreenshotPipeline(
     /**
      * Capture screenshot via MediaProjection
      */
-    private suspend fun captureViaMediaProjection(): Bitmap = withContext(Dispatchers.IO) {
-        // Step 1: Reuse an existing projection, or request consent on demand.
-        // Cloud callers cannot tap the Setup tab first, so the screenshot call must be
-        // able to launch the system consent dialog and continue after the user approves it.
-        val projection = mediaProjection ?: initializeMediaProjection().also {
-            registerCallback(it)
-            mediaProjection = it
-        }
-
-        // Step 2: Create VirtualDisplay if not already created
+    private suspend fun captureViaMediaProjection(projection: MediaProjection): Bitmap = withContext(Dispatchers.IO) {
+        // Create VirtualDisplay if not already created. Screenshot tasks must never
+        // request consent on demand because that interrupts remote agent operation.
         if ((virtualDisplay == null || imageReader == null) && virtualDisplayCreatedForProjection) {
             mediaProjection?.stop()
             releaseProjectionResources()
@@ -423,6 +422,7 @@ class ScreenshotPipeline(
                                     val mediaProjectionManager = accessibilityService.getSystemService(
                                         MediaProjectionManager::class.java
                                     )
+                                    prepareMediaProjectionForeground()
                                     val projection = mediaProjectionManager.getMediaProjection(resultCode, resultData)
 
                                     Log.i(TAG, "MediaProjection initialized successfully")

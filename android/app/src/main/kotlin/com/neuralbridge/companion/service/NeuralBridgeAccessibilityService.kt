@@ -270,6 +270,33 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Foreground service started")
     }
 
+    fun promoteForegroundForMediaProjection(): Boolean {
+        createNotificationChannel()
+
+        val notification = buildNotification(
+            title = getString(R.string.foreground_service_title),
+            message = "Fast screenshots enabled (60ms)"
+        )
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            Log.i(TAG, "Foreground service promoted for MediaProjection")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to promote foreground service for MediaProjection", e)
+            false
+        }
+    }
+
     /**
      * Request MediaProjection permission for fast screenshot capture
      *

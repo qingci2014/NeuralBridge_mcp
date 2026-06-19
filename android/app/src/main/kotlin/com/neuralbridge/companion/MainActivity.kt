@@ -94,6 +94,7 @@ class MainActivity : Activity() {
     private val statusRunnable = object : Runnable {
         override fun run() {
             updateServiceStatus()
+            updateAllPermissionStatus()
             updatePerformanceStats()
             if (!logsPaused) updateLogEntries()
             statusHandler.postDelayed(this, 1000)
@@ -128,6 +129,7 @@ class MainActivity : Activity() {
         super.onResume()
         NeuralBridgeAccessibilityService.instance?.tryConsumeMediaProjectionConsent()
         updateAllPermissionStatus()
+        statusHandler.postDelayed({ updateAllPermissionStatus() }, 500)
         statusHandler.post(statusRunnable)
     }
 
